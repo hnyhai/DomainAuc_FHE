@@ -1,27 +1,29 @@
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import '@rainbow-me/rainbowkit/styles.css';
-import React, { useEffect, useState } from "react";
+import React, { useState, useEffect } from "react";
 import { getContractReadOnly, getContractWithSigner } from "./components/useContract";
 import "./App.css";
 import { useAccount } from 'wagmi';
 import { useFhevm, useEncrypt, useDecrypt } from '../fhevm-sdk/src';
+import { ethers } from 'ethers';
 
-interface DomainAuctionData {
+interface DomainAuction {
   id: string;
   name: string;
   encryptedBid: string;
-  currentPrice: number;
+  publicValue1: number;
+  publicValue2: number;
   description: string;
   creator: string;
   timestamp: number;
-  isVerified?: boolean;
-  decryptedValue?: number;
+  decryptedValue: number;
+  isVerified: boolean;
 }
 
 const App: React.FC = () => {
   const { address, isConnected } = useAccount();
   const [loading, setLoading] = useState(true);
-  const [auctions, setAuctions] = useState<DomainAuctionData[]>([]);
+  const [auctions, setAuctions] = useState<DomainAuction[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [creatingAuction, setCreatingAuction] = useState(false);
@@ -31,7 +33,7 @@ const App: React.FC = () => {
     message: "" 
   });
   const [newAuctionData, setNewAuctionData] = useState({ name: "", bid: "", description: "" });
-  const [selectedAuction, setSelectedAuction] = useState<DomainAuctionData | null>(null);
+  const [selectedAuction, setSelectedAuction] = useState<DomainAuction | null>(null);
   const [decryptedBid, setDecryptedBid] = useState<number | null>(null);
   const [isDecrypting, setIsDecrypting] = useState(false);
   const [contractAddress, setContractAddress] = useState("");
@@ -51,7 +53,11 @@ const App: React.FC = () => {
         setFhevmInitializing(true);
         await initialize();
       } catch (error) {
-        setTransactionStatus({ visible: true, status: "error", message: "FHEVM initialization failed" });
+        setTransactionStatus({ 
+          visible: true, 
+          status: "error", 
+          message: "FHEVM initialization failed" 
+        });
         setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       } finally {
         setFhevmInitializing(false);
@@ -91,7 +97,7 @@ const App: React.FC = () => {
       if (!contract) return;
       
       const businessIds = await contract.getAllBusinessIds();
-      const auctionsList: DomainAuctionData[] = [];
+      const auctionsList: DomainAuction[] = [];
       
       for (const businessId of businessIds) {
         try {
@@ -100,15 +106,16 @@ const App: React.FC = () => {
             id: businessId,
             name: businessData.name,
             encryptedBid: businessId,
-            currentPrice: Number(businessData.publicValue1) || 0,
+            publicValue1: Number(businessData.publicValue1) || 0,
+            publicValue2: Number(businessData.publicValue2) || 0,
             description: businessData.description,
             creator: businessData.creator,
             timestamp: Number(businessData.timestamp),
-            isVerified: businessData.isVerified,
-            decryptedValue: Number(businessData.decryptedValue) || 0
+            decryptedValue: Number(businessData.decryptedValue) || 0,
+            isVerified: businessData.isVerified
           });
         } catch (e) {
-          console.error('Error loading business data:', e);
+          console.error('Error loading auction data:', e);
         }
       }
       
@@ -122,17 +129,16 @@ const App: React.FC = () => {
     }
   };
 
-  const updateStats = (data: DomainAuctionData[]) => {
-    setStats({
-      total: data.length,
-      verified: data.filter(a => a.isVerified).length,
-      active: data.filter(a => Date.now()/1000 - a.timestamp < 60 * 60 * 24).length
-    });
+  const updateStats = (auctions: DomainAuction[]) => {
+    const total = auctions.length;
+    const verified = auctions.filter(a => a.isVerified).length;
+    const active = auctions.filter(a => a.timestamp > Date.now()/1000 - 86400).length;
+    setStats({ total, verified, active });
   };
 
   const createAuction = async () => {
     if (!isConnected || !address) { 
-      setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
+      setTransactionStatus({ visible: true, status: "error", message: "Connect wallet first" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return; 
     }
@@ -142,7 +148,7 @@ const App: React.FC = () => {
     
     try {
       const contract = await getContractWithSigner();
-      if (!contract) throw new Error("Failed to get contract with signer");
+      if (!contract) throw new Error("Failed to get contract");
       
       const bidValue = parseInt(newAuctionData.bid) || 0;
       const businessId = `domain-${Date.now()}`;
@@ -154,12 +160,12 @@ const App: React.FC = () => {
         newAuctionData.name,
         encryptedResult.encryptedData,
         encryptedResult.proof,
-        bidValue,
+        0,
         0,
         newAuctionData.description
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction..." });
+      setTransactionStatus({ visible: true, status: "pending", message: "Waiting for confirmation..." });
       await tx.wait();
       
       setTransactionStatus({ visible: true, status: "success", message: "Auction created!" });
@@ -181,9 +187,9 @@ const App: React.FC = () => {
     }
   };
 
-  const decryptData = async (businessId: string): Promise<number | null> => {
+  const decryptBid = async (auctionId: string): Promise<number | null> => {
     if (!isConnected || !address) { 
-      setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
+      setTransactionStatus({ visible: true, status: "error", message: "Connect wallet first" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return null; 
     }
@@ -193,46 +199,67 @@ const App: React.FC = () => {
       const contractRead = await getContractReadOnly();
       if (!contractRead) return null;
       
-      const businessData = await contractRead.getBusinessData(businessId);
-      if (businessData.isVerified) {
-        const storedValue = Number(businessData.decryptedValue) || 0;
-        setTransactionStatus({ visible: true, status: "success", message: "Data verified" });
-        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+      const auctionData = await contractRead.getBusinessData(auctionId);
+      if (auctionData.isVerified) {
+        const storedValue = Number(auctionData.decryptedValue) || 0;
+        setDecryptedBid(storedValue);
+        setTransactionStatus({ 
+          visible: true, 
+          status: "success", 
+          message: "Bid already verified" 
+        });
+        setTimeout(() => {
+          setTransactionStatus({ visible: false, status: "pending", message: "" });
+        }, 2000);
         return storedValue;
       }
       
       const contractWrite = await getContractWithSigner();
       if (!contractWrite) return null;
       
-      const encryptedValueHandle = await contractRead.getEncryptedValue(businessId);
+      const encryptedValueHandle = await contractRead.getEncryptedValue(auctionId);
       
       const result = await verifyDecryption(
         [encryptedValueHandle],
         contractAddress,
         (abiEncodedClearValues: string, decryptionProof: string) => 
-          contractWrite.verifyDecryption(businessId, abiEncodedClearValues, decryptionProof)
+          contractWrite.verifyDecryption(auctionId, abiEncodedClearValues, decryptionProof)
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Verifying..." });
+      setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption..." });
       
       const clearValue = result.decryptionResult.clearValues[encryptedValueHandle];
+      const bidValue = Number(clearValue);
       
       await loadData();
+      setDecryptedBid(bidValue);
       
-      setTransactionStatus({ visible: true, status: "success", message: "Decrypted successfully!" });
-      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+      setTransactionStatus({ visible: true, status: "success", message: "Bid decrypted!" });
+      setTimeout(() => {
+        setTransactionStatus({ visible: false, status: "pending", message: "" });
+      }, 2000);
       
-      return Number(clearValue);
+      return bidValue;
       
     } catch (e: any) { 
       if (e.message?.includes("Data already verified")) {
-        setTransactionStatus({ visible: true, status: "success", message: "Data verified" });
-        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+        setTransactionStatus({ 
+          visible: true, 
+          status: "success", 
+          message: "Bid already verified" 
+        });
+        setTimeout(() => {
+          setTransactionStatus({ visible: false, status: "pending", message: "" });
+        }, 2000);
         await loadData();
         return null;
       }
       
-      setTransactionStatus({ visible: true, status: "error", message: "Decryption failed" });
+      setTransactionStatus({ 
+        visible: true, 
+        status: "error", 
+        message: "Decryption failed" 
+      });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return null; 
     } finally { 
@@ -240,59 +267,26 @@ const App: React.FC = () => {
     }
   };
 
+  const callIsAvailable = async () => {
+    try {
+      const contract = await getContractReadOnly();
+      if (!contract) return;
+      
+      const result = await contract.isAvailable();
+      if (result) {
+        setTransactionStatus({ visible: true, status: "success", message: "Contract is available" });
+        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+      }
+    } catch (e) {
+      setTransactionStatus({ visible: true, status: "error", message: "Check failed" });
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
+    }
+  };
+
   const filteredAuctions = auctions.filter(auction => 
-    auction.name.toLowerCase().includes(searchTerm.toLowerCase())
+    auction.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    auction.description.toLowerCase().includes(searchTerm.toLowerCase())
   );
-
-  const renderStats = () => {
-    return (
-      <div className="stats-panel">
-        <div className="stat-item">
-          <div className="stat-value">{stats.total}</div>
-          <div className="stat-label">Total Auctions</div>
-        </div>
-        <div className="stat-item">
-          <div className="stat-value">{stats.verified}</div>
-          <div className="stat-label">Verified</div>
-        </div>
-        <div className="stat-item">
-          <div className="stat-value">{stats.active}</div>
-          <div className="stat-label">Active</div>
-        </div>
-      </div>
-    );
-  };
-
-  const renderFeatures = () => {
-    return (
-      <div className="features-panel">
-        <h3>FHE Domain Auction Features</h3>
-        <div className="feature-list">
-          <div className="feature-item">
-            <div className="feature-icon">🔒</div>
-            <div className="feature-content">
-              <h4>Encrypted Bidding</h4>
-              <p>All bids are encrypted using FHE to prevent front-running</p>
-            </div>
-          </div>
-          <div className="feature-item">
-            <div className="feature-icon">⚖️</div>
-            <div className="feature-content">
-              <h4>Vickrey Auction</h4>
-              <p>Second-price auction mechanism for fair pricing</p>
-            </div>
-          </div>
-          <div className="feature-item">
-            <div className="feature-icon">🔄</div>
-            <div className="feature-content">
-              <h4>Auto Transfer</h4>
-              <p>Domain ownership automatically transferred to winner</p>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  };
 
   if (!isConnected) {
     return (
@@ -302,14 +296,31 @@ const App: React.FC = () => {
             <h1>FHE Domain Auction</h1>
           </div>
           <div className="header-actions">
-            <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+            <div className="wallet-connect-wrapper">
+              <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+            </div>
           </div>
         </header>
         
         <div className="connection-prompt">
           <div className="connection-content">
-            <h2>Connect Your Wallet</h2>
-            <p>Connect your wallet to participate in encrypted domain auctions</p>
+            <div className="connection-icon">🔐</div>
+            <h2>Connect Wallet to Start</h2>
+            <p>Connect your wallet to access encrypted domain auctions.</p>
+            <div className="connection-steps">
+              <div className="step">
+                <span>1</span>
+                <p>Connect wallet</p>
+              </div>
+              <div className="step">
+                <span>2</span>
+                <p>FHE system initialization</p>
+              </div>
+              <div className="step">
+                <span>3</span>
+                <p>Bid on domains privately</p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -320,7 +331,8 @@ const App: React.FC = () => {
     return (
       <div className="loading-screen">
         <div className="fhe-spinner"></div>
-        <p>Initializing FHE System...</p>
+        <p>Initializing FHE Encryption...</p>
+        <p>Status: {fhevmInitializing ? "Initializing" : status}</p>
       </div>
     );
   }
@@ -346,32 +358,61 @@ const App: React.FC = () => {
           >
             + New Auction
           </button>
-          <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+          <div className="wallet-connect-wrapper">
+            <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+          </div>
         </div>
       </header>
       
-      <div className="main-content">
-        <div className="left-panel">
-          {renderStats()}
-          {renderFeatures()}
-        </div>
-        
-        <div className="right-panel">
-          <div className="search-section">
-            <input
-              type="text"
-              placeholder="Search domains..."
+      <div className="main-content-container">
+        <div className="dashboard-section">
+          <div className="search-container">
+            <input 
+              type="text" 
+              placeholder="Search domains..." 
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="search-input"
             />
-            <button 
-              onClick={loadData} 
-              className="refresh-btn" 
-              disabled={isRefreshing}
-            >
-              {isRefreshing ? "Refreshing..." : "Refresh"}
-            </button>
+            <button className="search-btn">🔍</button>
+          </div>
+          
+          <div className="stats-panels">
+            <div className="panel">
+              <h3>Total Auctions</h3>
+              <div className="stat-value">{stats.total}</div>
+            </div>
+            
+            <div className="panel">
+              <h3>Verified Bids</h3>
+              <div className="stat-value">{stats.verified}</div>
+            </div>
+            
+            <div className="panel">
+              <h3>Active Now</h3>
+              <div className="stat-value">{stats.active}</div>
+            </div>
+          </div>
+        </div>
+        
+        <div className="auctions-section">
+          <div className="section-header">
+            <h2>Domain Auctions</h2>
+            <div className="header-actions">
+              <button 
+                onClick={loadData} 
+                className="refresh-btn" 
+                disabled={isRefreshing}
+              >
+                {isRefreshing ? "Refreshing..." : "Refresh"}
+              </button>
+              <button 
+                onClick={callIsAvailable} 
+                className="check-btn"
+              >
+                Check Contract
+              </button>
+            </div>
           </div>
           
           <div className="auctions-list">
@@ -393,12 +434,15 @@ const App: React.FC = () => {
               >
                 <div className="auction-title">{auction.name}</div>
                 <div className="auction-meta">
-                  <span>Current Price: {auction.currentPrice}</span>
                   <span>Created: {new Date(auction.timestamp * 1000).toLocaleDateString()}</span>
                 </div>
                 <div className="auction-status">
-                  Status: {auction.isVerified ? "✅ Verified" : "🔓 Pending"}
+                  {auction.isVerified ? 
+                    `✅ Verified Bid: ${auction.decryptedValue}` : 
+                    "🔓 Encrypted Bid"
+                  }
                 </div>
+                <div className="auction-creator">Creator: {auction.creator.substring(0, 6)}...{auction.creator.substring(38)}</div>
               </div>
             ))}
           </div>
@@ -424,15 +468,21 @@ const App: React.FC = () => {
             setDecryptedBid(null); 
           }} 
           decryptedBid={decryptedBid} 
-          setDecryptedBid={setDecryptedBid} 
           isDecrypting={isDecrypting || fheIsDecrypting} 
-          decryptData={() => decryptData(selectedAuction.id)}
+          decryptBid={() => decryptBid(selectedAuction.id)}
         />
       )}
       
       {transactionStatus.visible && (
-        <div className={`transaction-toast ${transactionStatus.status}`}>
-          <div className="toast-message">{transactionStatus.message}</div>
+        <div className="transaction-modal">
+          <div className="transaction-content">
+            <div className={`transaction-icon ${transactionStatus.status}`}>
+              {transactionStatus.status === "pending" && <div className="fhe-spinner"></div>}
+              {transactionStatus.status === "success" && <div className="success-icon">✓</div>}
+              {transactionStatus.status === "error" && <div className="error-icon">✗</div>}
+            </div>
+            <div className="transaction-message">{transactionStatus.message}</div>
+          </div>
         </div>
       )}
     </div>
@@ -466,6 +516,11 @@ const ModalCreateAuction: React.FC<{
         </div>
         
         <div className="modal-body">
+          <div className="fhe-notice">
+            <strong>FHE 🔐 Encryption</strong>
+            <p>Your bid will be encrypted with Zama FHE</p>
+          </div>
+          
           <div className="form-group">
             <label>Domain Name *</label>
             <input 
@@ -484,7 +539,7 @@ const ModalCreateAuction: React.FC<{
               name="bid" 
               value={auctionData.bid} 
               onChange={handleChange} 
-              placeholder="Enter bid amount..." 
+              placeholder="Enter starting bid..." 
               step="1"
               min="0"
             />
@@ -497,7 +552,7 @@ const ModalCreateAuction: React.FC<{
               name="description" 
               value={auctionData.description} 
               onChange={handleChange} 
-              placeholder="Enter description..." 
+              placeholder="Describe this domain..." 
             />
           </div>
         </div>
@@ -509,7 +564,7 @@ const ModalCreateAuction: React.FC<{
             disabled={creating || isEncrypting || !auctionData.name || !auctionData.bid} 
             className="submit-btn"
           >
-            {creating || isEncrypting ? "Encrypting..." : "Create Auction"}
+            {creating || isEncrypting ? "Encrypting and Creating..." : "Create Auction"}
           </button>
         </div>
       </div>
@@ -518,23 +573,19 @@ const ModalCreateAuction: React.FC<{
 };
 
 const AuctionDetailModal: React.FC<{
-  auction: DomainAuctionData;
+  auction: DomainAuction;
   onClose: () => void;
   decryptedBid: number | null;
-  setDecryptedBid: (value: number | null) => void;
   isDecrypting: boolean;
-  decryptData: () => Promise<number | null>;
-}> = ({ auction, onClose, decryptedBid, setDecryptedBid, isDecrypting, decryptData }) => {
+  decryptBid: () => Promise<number | null>;
+}> = ({ auction, onClose, decryptedBid, isDecrypting, decryptBid }) => {
   const handleDecrypt = async () => {
     if (decryptedBid !== null) { 
       setDecryptedBid(null); 
       return; 
     }
     
-    const decrypted = await decryptData();
-    if (decrypted !== null) {
-      setDecryptedBid(decrypted);
-    }
+    await decryptBid();
   };
 
   return (
@@ -556,8 +607,8 @@ const AuctionDetailModal: React.FC<{
               <strong>{auction.creator.substring(0, 6)}...{auction.creator.substring(38)}</strong>
             </div>
             <div className="info-item">
-              <span>Current Price:</span>
-              <strong>{auction.currentPrice} ETH</strong>
+              <span>Created:</span>
+              <strong>{new Date(auction.timestamp * 1000).toLocaleDateString()}</strong>
             </div>
           </div>
           
@@ -567,7 +618,7 @@ const AuctionDetailModal: React.FC<{
             <div className="data-row">
               <div className="data-label">Bid Amount:</div>
               <div className="data-value">
-                {auction.isVerified && auction.decryptedValue ? 
+                {auction.isVerified ? 
                   `${auction.decryptedValue} ETH (Verified)` : 
                   decryptedBid !== null ? 
                   `${decryptedBid} ETH (Decrypted)` : 
@@ -579,8 +630,61 @@ const AuctionDetailModal: React.FC<{
                 onClick={handleDecrypt} 
                 disabled={isDecrypting}
               >
-                {isDecrypting ? "Decrypting..." : auction.isVerified ? "Verified" : decryptedBid !== null ? "Re-verify" : "Decrypt"}
+                {isDecrypting ? (
+                  "🔓 Verifying..."
+                ) : auction.isVerified ? (
+                  "✅ Verified"
+                ) : decryptedBid !== null ? (
+                  "🔄 Re-verify"
+                ) : (
+                  "🔓 Verify Bid"
+                )}
               </button>
+            </div>
+            
+            <div className="fhe-info">
+              <div className="fhe-icon">🔐</div>
+              <div>
+                <strong>FHE 🔐 Bid Encryption</strong>
+                <p>Your bid is encrypted on-chain using Zama FHE technology.</p>
+              </div>
+            </div>
+          </div>
+          
+          <div className="chart-section">
+            <h3>Bid Verification Process</h3>
+            <div className="fhe-flow">
+              <div className="flow-step">
+                <div className="step-icon">1</div>
+                <div className="step-content">
+                  <h4>Encrypt Bid</h4>
+                  <p>Bid encrypted with FHE before submission</p>
+                </div>
+              </div>
+              <div className="flow-arrow">→</div>
+              <div className="flow-step">
+                <div className="step-icon">2</div>
+                <div className="step-content">
+                  <h4>On-chain Storage</h4>
+                  <p>Encrypted bid stored securely on blockchain</p>
+                </div>
+              </div>
+              <div className="flow-arrow">→</div>
+              <div className="flow-step">
+                <div className="step-icon">3</div>
+                <div className="step-content">
+                  <h4>Offline Decryption</h4>
+                  <p>Client decrypts bid using relayer-sdk</p>
+                </div>
+              </div>
+              <div className="flow-arrow">→</div>
+              <div className="flow-step">
+                <div className="step-icon">4</div>
+                <div className="step-content">
+                  <h4>On-chain Verification</h4>
+                  <p>Proof submitted for FHE signature validation</p>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -593,7 +697,7 @@ const AuctionDetailModal: React.FC<{
               disabled={isDecrypting}
               className="verify-btn"
             >
-              Verify on-chain
+              {isDecrypting ? "Verifying..." : "Verify on-chain"}
             </button>
           )}
         </div>
